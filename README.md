@@ -81,10 +81,11 @@ Leave out `ENABLE_FRAMEGRAB_PHONE_CAMERAS` if you only want cameras attached to 
 
 With `ENABLE_FRAMEGRAB_PHONE_CAMERAS="true"`, the server also serves a small web page over HTTPS on port 8443.
 
-1. Put the phone on the same network as the computer and open `https://<your-computer's-ip>:8443/`. The exact address is written to the server log at startup.
-2. Accept the browser's certificate warning. The server makes its own self-signed certificate, because browsers only allow camera access over HTTPS. You do this once per phone. It will ask again if your computer's IP address changes.
-3. Allow camera access, type a name such as `left bench`, and tap **Start**.
-4. Prop the phone up and plug it into a charger.
+1. Ask the agent to add a phone camera. It calls the `add_phone_camera` tool, which opens a page on the computer with a QR code and a PIN, and tells the agent both. If the page does not open, the agent can read you the link and the PIN.
+2. Put the phone on the same Wi-Fi as the computer and scan the QR code with its camera. The PIN arrives with it. Without a scanner, open `https://<your-computer's-ip>:8443/` on the phone and type the PIN.
+3. Accept the browser's certificate warning. The server makes its own self-signed certificate, because browsers only allow camera access over HTTPS. You do this once per phone. It will ask again if your computer's IP address changes.
+4. Allow camera access, type a name such as `left bench`, and tap **Start**.
+5. Prop the phone up and plug it into a charger.
 
 The name now works like any other framegrabber. Ask the agent to list cameras or to look at `left bench`. Repeat on more phones with different names.
 
@@ -98,13 +99,16 @@ What to expect:
 | The page is closed or in the background, the phone sleeps, or another app takes the camera | The page stops sending, and `grab_frame` returns an error saying how long ago the last frame arrived, not an old image. Sending resumes by itself when the page is back on screen. |
 | The page is open in two tabs | Only one tab can use the camera. The second tab tells you after a few seconds. |
 | A name is already used by a USB or RTSP camera | The page shows an error. Pick another name. |
+| The phone asks for the PIN again | Its token is no longer valid, for example after the data directory was deleted. Ask the agent for the current PIN. |
 
 On the page you can switch between the front and back camera. Where the browser supports it, you can also turn on the torch. The page asks the phone to keep the screen on while it is live.
 
 ### Security
-**There is no authentication yet.** While phone cameras are enabled, anyone on your network can open the page and register a camera, or replace the picture of an existing one by using the same name. Only enable this on networks you trust. A PIN is planned.
+Joining needs the PIN shown on the computer, so only someone who can see that screen can add a camera or take over an existing name. The PIN changes every time the server starts. After a phone has joined, it keeps a token for its camera name, so reloading the page or restarting the server does not ask for the PIN again. Five wrong PINs from one address pause that address for a minute.
 
-Frames stay on your network. They go from the phone to your computer and nowhere else.
+The token key and the certificate are kept in the data directory (see [Configuration](#configuration)). Delete that directory to sign every phone out.
+
+Frames are encrypted on the way from the phone to your computer and go nowhere else. The certificate is self-signed, which is why the phone shows a warning the first time.
 
 ### Tested with
 Chrome on Android. Safari on iOS has not been tested yet.
@@ -132,6 +136,7 @@ With autodiscovery on, `FRAMEGRAB_RTSP_AUTO_DISCOVERY_MODE` controls the search 
 | `get_framegrabber_config` | Return the configuration of a framegrabber. |
 | `set_config` | Update the configuration options of a framegrabber. Phone cameras have no options. |
 | `release_grabber` | Release a framegrabber and remove it from the available grabbers. |
+| `add_phone_camera` | Return the link, the PIN and a QR code for joining a phone, and open a page showing them on this computer (`open_browser=false` skips that). |
 
 ### Resources
 - `fg://framegrabbers`: all available framegrabbers by name.
@@ -147,7 +152,7 @@ All settings are environment variables.
 | `ENABLE_FRAMEGRAB_AUTO_DISCOVERY` | `false` | Discover webcams and USB cameras at startup. |
 | `FRAMEGRAB_RTSP_AUTO_DISCOVERY_MODE` | `off` | One of `off`, `ip_only`, `light`, `complete_fast`, `complete_slow`. |
 
-The self-signed certificate and its key are kept in your user data directory (on Linux, `~/.local/share/multicam-mcp-server/`). Delete that directory to make a new certificate.
+The self-signed certificate, the token key and the join page are kept in your user data directory (on Linux, `~/.local/share/multicam-mcp-server/`). Delete that directory to make a new certificate and sign every phone out.
 
 ## Development
 
@@ -162,6 +167,5 @@ make build                       # build the wheel
 The phone camera server lives in `multicam_mcp_phone.py`, and the page is `multicam_mcp_phone.html`. `multicam_mcp_server.py` holds the MCP tools.
 
 ## Roadmap
-- A PIN and a QR code for joining, plus a tool that lets the agent show them to you.
 - Full-resolution capture on demand, with a smaller preview the rest of the time.
 - Testing on iOS Safari.

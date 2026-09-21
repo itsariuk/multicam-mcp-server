@@ -36,6 +36,9 @@ FRAMEGRAB_PHONE_CAMERAS_PORT = os.getenv("FRAMEGRAB_PHONE_CAMERAS_PORT") or "844
 # Cache to store created FrameGrabbers, maps name to FrameGrabber
 _grabber_cache = {}
 
+# The phone camera server while it is listening, else None. Set by app_lifespan.
+_phone_server: PhoneCameraServer | None = None
+
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[Any]:
@@ -50,11 +53,12 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[Any]:
         except Exception:
             logger.error("Error autodiscovering framegrabbers.", exc_info=True)
 
-    phone_server = None
+    global _phone_server
     if ENABLE_FRAMEGRAB_PHONE_CAMERAS:
         try:
             phone_server = PhoneCameraServer(_grabber_cache)
-            phone_server.start(port=int(FRAMEGRAB_PHONE_CAMERAS_PORT))
+            if phone_server.start(port=int(FRAMEGRAB_PHONE_CAMERAS_PORT)):
+                _phone_server = phone_server
         except Exception:
             logger.error("Error starting phone camera server.", exc_info=True)
 
@@ -63,8 +67,9 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[Any]:
     yield {}
 
     logger.info("Multicam MCP server is stopping, releasing framegrabbers...")
-    if phone_server:
-        phone_server.stop()
+    if _phone_server:
+        _phone_server.stop()
+        _phone_server = None
     for _, grabber in _grabber_cache.items():
         try:
             grabber.release()
@@ -216,6 +221,28 @@ def release_framegrabber(framegrabber_name: str) -> bool:
     except Exception as e:
         logger.error(f"Error releasing framegrabber {framegrabber_name}: {e}")
         raise ValueError(f"Failed to release framegrabber: {str(e)}")
+
+
+@mcp.tool(
+    name="add_phone_camera",
+    description="""Get what a person needs to connect a phone as a camera: a link, a PIN, and a QR code that carries both.
+By default it also opens a page with the QR code in this computer's browser. Tell the user the link and the PIN.
+Once the phone has joined, its name appears in list_framegrabbers and works with grab_frame.""",
+)
+def add_phone_camera(open_browser: bool = True) -> list:
+    if _phone_server is None:
+        raise ValueError(
+            "Phone cameras are not running. Set ENABLE_FRAMEGRAB_PHONE_CAMERAS=true in this MCP server's "
+            f"environment and restart it. If it is already set, port {FRAMEGRAB_PHONE_CAMERAS_PORT} may be "
+            "in use by another copy of this server; set FRAMEGRAB_PHONE_CAMERAS_PORT to a free port."
+        )
+    if open_browser:
+        _phone_server.open_join_page()
+    return [
+        f"On the phone, open {_phone_server.url} (same network as this computer) or scan the QR code. "
+        f"PIN: {_phone_server.pin}. The phone will show a certificate warning the first time; that is expected.",
+        Image(data=_phone_server.qr_png(), format="png"),
+    ]
 
 
 @mcp.resource(

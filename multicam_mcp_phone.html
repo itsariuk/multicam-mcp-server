@@ -23,6 +23,9 @@
 <label for="name">Camera name</label>
 <input id="name" maxlength="40" autocomplete="off" autocapitalize="off" placeholder="left bench">
 
+<label for="pin">PIN <small>(shown on the computer; only needed the first time)</small></label>
+<input id="pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code">
+
 <label for="device">Camera</label>
 <select id="device" disabled><option>Available after Start</option></select>
 
@@ -38,7 +41,7 @@
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 _-]{0,39}$/;
 const SEND_EVERY_MS = 1000;
 const $ = id => document.getElementById(id);
-const nameInput = $('name'), deviceSelect = $('device'), startBtn = $('start'),
+const nameInput = $('name'), pinInput = $('pin'), deviceSelect = $('device'), startBtn = $('start'),
       torchBtn = $('torch'), video = $('video');
 const canvas = document.createElement('canvas');
 let stream = null, track = null, running = false, sent = 0, name = '';
@@ -49,8 +52,17 @@ const status = text => { $('status').textContent = text; };
 // localStorage can throw (private mode, blocked site data); the page must work without it.
 const load = key => { try { return localStorage.getItem(key); } catch (e) { return null; } };
 const store = (key, value) => { try { localStorage.setItem(key, value); } catch (e) {} };
+const forget = key => { try { localStorage.removeItem(key); } catch (e) {} };
+// The token this phone was given for the current camera name, if it has joined before.
+const authHeaders = () => { const t = load('token:' + name); return t ? {authorization: 'Bearer ' + t} : {}; };
 
 nameInput.value = load('name') || '';
+// The QR code carries the PIN in the URL fragment. Use it, then take it out of the address bar.
+const pinInUrl = location.hash.match(/pin=(\d{6})/);
+if (pinInUrl) {
+  pinInput.value = pinInUrl[1];
+  history.replaceState(null, '', location.pathname);
+}
 if (!window.isSecureContext || !navigator.mediaDevices) {
   status('This page needs HTTPS. Open the https:// address and accept the certificate warning.');
   startBtn.disabled = true;
@@ -70,6 +82,7 @@ function halt(message) {
   stopAll();
   startBtn.disabled = false;
   nameInput.disabled = false;
+  pinInput.disabled = false;
   status(message);
 }
 
@@ -111,10 +124,17 @@ async function listCameras() {
 }
 
 async function register() {
+  // Send the stored token and the typed PIN together: if the token has gone stale, the PIN
+  // still gets us in. An empty PIN is left out, so it is not counted as a wrong guess.
   const res = await fetch('/api/cameras', {
-    method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({name})});
-  if (res.ok) return null;
+    method: 'POST', headers: {'content-type': 'application/json', ...authHeaders()},
+    body: JSON.stringify({name, pin: pinInput.value.trim() || undefined})});
   const body = await res.json().catch(() => ({}));
+  if (res.ok) {
+    if (body.token) store('token:' + name, body.token);
+    return null;
+  }
+  if (res.status === 401) forget('token:' + name);
   return body.error || 'Could not register (' + res.status + ').';
 }
 
@@ -128,6 +148,7 @@ async function start() {
   // Single-shot: a second tap would re-assign srcObject and abort the first play().
   startBtn.disabled = true;
   nameInput.disabled = true;
+  pinInput.disabled = true;
   status('Starting camera…');
   // Chrome gives the camera to one tab at a time; a second tab just waits, silently.
   const hint = setTimeout(() => status('Waiting for the camera… is this page open in another tab?'), 5000);
@@ -167,8 +188,12 @@ async function loop(mySession) {
       canvas.height = video.videoHeight;
       canvas.getContext('2d').drawImage(video, 0, 0);
       const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.85));
-      const res = await fetch('/api/cameras/' + encodeURIComponent(name) + '/frame', {method: 'POST', body: blob});
-      if (res.status === 404) {
+      const res = await fetch('/api/cameras/' + encodeURIComponent(name) + '/frame', {method: 'POST', headers: authHeaders(), body: blob});
+      if (res.status === 401) {
+        forget('token:' + name);
+        halt('Not authorised. Enter the PIN shown on the computer and tap Start.');
+        return;
+      } else if (res.status === 404) {
         // The server restarted and forgot us: rejoin silently. If it refuses (the name was
         // taken meanwhile, too many cameras), stop rather than claim to be live.
         const error = await register();
