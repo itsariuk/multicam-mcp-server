@@ -93,13 +93,15 @@ What to expect:
 
 | Situation | What happens |
 |-----------|--------------|
-| Agent calls `grab_frame` | It gets the latest frame. The phone sends one full-resolution frame per second. |
+| Agent calls `grab_frame` | The server asks the phone for a full-resolution photo and returns it, usually within a second or two. If the photo does not arrive within 4 seconds (slow Wi-Fi), it returns the latest preview instead. |
 | Agent calls `release_grabber` | The page stops sending and says so. Tap **Start** to rejoin. |
 | The MCP client restarts the server | The page reconnects by itself under the same name. You don't need to touch the phone. |
-| The page is closed or in the background, the phone sleeps, or another app takes the camera | The page stops sending, and `grab_frame` returns an error saying how long ago the last frame arrived, not an old image. Sending resumes by itself when the page is back on screen. |
+| The page is closed or in the background, the phone sleeps, or another app takes the camera | The page stops sending its preview, and `grab_frame` returns an error saying how long ago the last frame arrived, not an old image. Sending resumes by itself when the page is back on screen. |
 | The page is open in two tabs | Only one tab can use the camera. The second tab tells you after a few seconds. |
 | A name is already used by a USB or RTSP camera | The page shows an error. Pick another name. |
 | The phone asks for the PIN again | Its token is no longer valid, for example after the data directory was deleted. Ask the agent for the current PIN. |
+
+While nobody is looking, the phone only sends a small preview once a second (a few tens of kilobytes), so a full session costs little battery and Wi-Fi.
 
 On the page you can switch between the front and back camera. Where the browser supports it, you can also turn on the torch. The page asks the phone to keep the screen on while it is live.
 
@@ -167,5 +169,4 @@ make build                       # build the wheel
 The phone camera server lives in `multicam_mcp_phone.py`, and the page is `multicam_mcp_phone.html`. `multicam_mcp_server.py` holds the MCP tools.
 
 ## Roadmap
-- Full-resolution capture on demand, with a smaller preview the rest of the time.
 - Testing on iOS Safari.

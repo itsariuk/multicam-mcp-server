@@ -40,11 +40,16 @@
 <script>
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 _-]{0,39}$/;
 const SEND_EVERY_MS = 1000;
+// A small preview goes up once a second; a full-resolution photo only when the agent asks.
+const PREVIEW_LONG_EDGE = 1280;
+const PREVIEW_QUALITY = 0.7;
+const PHOTO_QUALITY = 0.92;
 const $ = id => document.getElementById(id);
 const nameInput = $('name'), pinInput = $('pin'), deviceSelect = $('device'), startBtn = $('start'),
       torchBtn = $('torch'), video = $('video');
 const canvas = document.createElement('canvas');
-let stream = null, track = null, running = false, sent = 0, name = '';
+let stream = null, track = null, running = false, sent = 0, photos = 0, name = '';
+let lastPreviewBytes = 0;  // not used by the page; read over remote debugging during soak tests
 let lastFrameTime = -1;  // video.currentTime of the last frame we sent
 let session = 0;  // bumped on every Start, so a send loop left over from an earlier session exits
 
@@ -161,6 +166,7 @@ async function start() {
     store('name', name);
     requestWakeLock();
     sent = 0;
+    photos = 0;
     lastFrameTime = -1;
     running = true;
     loop(++session);
@@ -169,6 +175,43 @@ async function start() {
     halt(e.name === 'NotAllowedError' ? 'Camera permission was denied. Allow it in the browser settings and tap Start.'
        : e.name === 'Error' ? e.message : e.name + ': ' + e.message);
   }
+}
+
+// Draw the current video frame, scaled so its long edge is at most longEdge (0 = full size).
+function capture(longEdge, quality) {
+  const scale = longEdge ? Math.min(1, longEdge / Math.max(video.videoWidth, video.videoHeight)) : 1;
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
+  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+  return new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+}
+
+// Upload one image. Returns the server's JSON on success, {} when there is nothing to act
+// on (the server restarted and we rejoined), or null after the session was halted.
+async function send(blob, kind) {
+  const url = '/api/cameras/' + encodeURIComponent(name) + '/frame' + (kind === 'photo' ? '?kind=photo' : '');
+  const res = await fetch(url, {method: 'POST', headers: authHeaders(), body: blob});
+  if (res.status === 401) {
+    forget('token:' + name);
+    halt('Not authorised. Enter the PIN shown on the computer and tap Start.');
+    return null;
+  }
+  if (res.status === 404) {
+    // The server restarted and forgot us: rejoin silently. If it refuses (the name was
+    // taken meanwhile, too many cameras), stop rather than claim to be live.
+    const error = await register();
+    if (error) { halt(error); return null; }
+    return {};
+  }
+  if (res.status === 410) {
+    halt('Released by the agent. Tap Start to rejoin.');
+    return null;
+  }
+  if (!res.ok) {
+    status('Server rejected the ' + kind + ' (' + res.status + ').');
+    return {};
+  }
+  return res.json().catch(() => ({}));
 }
 
 // Self-scheduling rather than setInterval, so slow Wi-Fi cannot pile up requests.
@@ -184,27 +227,18 @@ async function loop(mySession) {
         : 'No new picture from the camera. Is another app using it?');
     } else if (video.videoWidth) {  // 0 while switching cameras; toBlob would yield null
       lastFrameTime = video.currentTime;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      canvas.getContext('2d').drawImage(video, 0, 0);
-      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.85));
-      const res = await fetch('/api/cameras/' + encodeURIComponent(name) + '/frame', {method: 'POST', headers: authHeaders(), body: blob});
-      if (res.status === 401) {
-        forget('token:' + name);
-        halt('Not authorised. Enter the PIN shown on the computer and tap Start.');
-        return;
-      } else if (res.status === 404) {
-        // The server restarted and forgot us: rejoin silently. If it refuses (the name was
-        // taken meanwhile, too many cameras), stop rather than claim to be live.
-        const error = await register();
-        if (error) { halt(error); return; }
-      } else if (res.status === 410) {
-        halt('Released by the agent. Tap Start to rejoin.');
-        return;
-      } else if (res.ok) {
-        status('Live as "' + name + '" · ' + (++sent) + ' frames sent');
-      } else {
-        status('Server rejected the frame (' + res.status + ').');
+      const preview = await capture(PREVIEW_LONG_EDGE, PREVIEW_QUALITY);
+      lastPreviewBytes = preview.size;
+      const reply = await send(preview, 'preview');
+      if (!reply) return;  // halted: do not reschedule
+      if ('hires_requested' in reply) {
+        status('Live as "' + name + '" · ' + (++sent) + ' frames sent' + (photos ? ' · ' + photos + ' photos' : ''));
+      }
+      if (reply.hires_requested && video.videoWidth) {  // 0 if a camera switch just began
+        // The agent is waiting on grab_frame: answer with a full-resolution photo now.
+        const photo = await send(await capture(0, PHOTO_QUALITY), 'photo');
+        if (!photo) return;
+        if ('hires_requested' in photo) photos++;
       }
     }
   } catch (e) {

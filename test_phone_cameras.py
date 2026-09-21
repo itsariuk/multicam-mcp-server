@@ -1,5 +1,7 @@
 import ssl
 import sys
+import threading
+import time
 import urllib.request
 
 import cv2
@@ -34,8 +36,11 @@ def wrong_pin(server) -> str:
     return "000000" if server.pin != "000000" else "111111"
 
 
-def test_register_post_grab_roundtrip(ctx):
+def test_register_post_grab_roundtrip(ctx, monkeypatch):
     registry, client, server = ctx
+    monkeypatch.setattr(
+        phone, "HIRES_TIMEOUT_S", 0
+    )  # no phone to answer: use the preview
     body = {"name": "left bench", "pin": server.pin}
     assert client.post("/api/cameras", json=body).status_code == 201
     assert client.post("/api/cameras", json=body).status_code == 200
@@ -286,9 +291,10 @@ def test_bad_port_setting_does_not_break_the_mcp_server(monkeypatch, port):
     importlib.reload(srv)
 
 
-def test_grab_frame_tool_serves_phone_camera(tmp_path):
+def test_grab_frame_tool_serves_phone_camera(tmp_path, monkeypatch):
     import multicam_mcp_server as srv
 
+    monkeypatch.setattr(phone, "HIRES_TIMEOUT_S", 0)
     server = phone.PhoneCameraServer(srv._grabber_cache, cert_dir=tmp_path)
     client = TestClient(server.app)
     try:
@@ -319,3 +325,102 @@ def test_add_phone_camera_tool(tmp_path, monkeypatch):
     assert image.data[:4] == b"\x89PNG" and not opened
     srv.add_phone_camera()
     assert opened == [1]
+
+
+def test_grab_asks_for_a_photo_and_returns_it(ctx):
+    registry, client, server = ctx
+    cam = join(client, server, "cam")
+
+    def post(body, **params):
+        return client.post(
+            "/api/cameras/cam/frame", content=body, headers=cam, params=params
+        )
+
+    assert post(jpeg(64, 48)).json() == {"hires_requested": False}
+    result = {}
+    grabber = threading.Thread(
+        target=lambda: result.update(frame=registry["cam"].grab())
+    )
+    grabber.start()
+    # The next preview post learns that someone is waiting ...
+    for _ in range(50):
+        if post(jpeg(64, 48)).json()["hires_requested"]:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("grab() never asked for a photo")
+    # ... and the photo satisfies the waiting grab().
+    assert post(jpeg(640, 480), kind="photo").status_code == 200
+    grabber.join(timeout=2)
+    assert not grabber.is_alive() and result["frame"].shape == (480, 640, 3)
+    assert post(jpeg(64, 48)).json() == {"hires_requested": False}  # request consumed
+
+
+def test_grab_falls_back_to_the_preview_when_no_photo_arrives(ctx, monkeypatch, caplog):
+    registry, client, server = ctx
+    cam = join(client, server, "cam")
+    client.post("/api/cameras/cam/frame", content=jpeg(64, 48), headers=cam)
+    monkeypatch.setattr(phone, "HIRES_TIMEOUT_S", 0.05)
+    assert registry["cam"].grab().shape == (48, 64, 3)
+    assert "did not send a photo" in caplog.text
+
+
+def test_grab_does_not_wait_on_a_dead_page(ctx, monkeypatch):
+    registry, client, server = ctx
+    cam = join(client, server, "cam")
+    client.post("/api/cameras/cam/frame", content=jpeg(), headers=cam)
+    monkeypatch.setattr(phone, "STALE_AFTER_S", -1)
+    monkeypatch.setattr(phone, "HIRES_TIMEOUT_S", 30)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="Is the page still open"):
+        registry["cam"].grab()
+    assert time.monotonic() - started < 1
+
+
+def test_photo_upload_is_validated_like_a_preview(ctx):
+    _, client, server = ctx
+    cam = join(client, server, "cam")
+
+    def post(body, headers=cam, **params):
+        return client.post(
+            "/api/cameras/cam/frame", content=body, headers=headers, params=params
+        ).status_code
+
+    assert post(b"GIF89a", kind="photo") == 400
+    assert post(jpeg(), headers=None, kind="photo") == 401
+    assert post(jpeg(), kind="banana") == 422
+
+
+def test_late_photo_is_dropped_and_undecodable_photo_falls_back(
+    ctx, monkeypatch, caplog
+):
+    registry, client, server = ctx
+    cam = join(client, server, "cam")
+
+    def post(body, **params):
+        return client.post(
+            "/api/cameras/cam/frame", content=body, headers=cam, params=params
+        )
+
+    post(jpeg(64, 48))
+    # Nobody is waiting: a photo is dropped, and the next grab still has to ask afresh.
+    assert post(b"\xff\xd8 late", kind="photo").status_code == 200
+    monkeypatch.setattr(phone, "HIRES_TIMEOUT_S", 0.05)
+    assert registry["cam"].grab().shape == (48, 64, 3)
+    assert "did not send a photo" in caplog.text
+    # A photo that arrives in time but cannot be decoded also falls back to the preview.
+    caplog.clear()
+    monkeypatch.setattr(phone, "HIRES_TIMEOUT_S", 5)
+    result = {}
+    grabber = threading.Thread(
+        target=lambda: result.update(frame=registry["cam"].grab())
+    )
+    grabber.start()
+    for _ in range(50):
+        if post(jpeg(64, 48)).json()["hires_requested"]:
+            break
+        time.sleep(0.01)
+    assert post(b"\xff\xd8 not really a jpeg", kind="photo").status_code == 200
+    grabber.join(timeout=2)
+    assert not grabber.is_alive() and result["frame"].shape == (48, 64, 3)
+    assert "undecodable" in caplog.text

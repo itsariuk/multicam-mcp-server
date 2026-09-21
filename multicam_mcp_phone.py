@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 MAX_FRAME_BYTES = 20 * 1024 * 1024
 MAX_PHONE_CAMERAS = 16
 STALE_AFTER_S = 10.0
+HIRES_TIMEOUT_S = 4.0  # how long grab() waits for a full-resolution photo
 PIN_MAX_FAILURES = 5  # wrong PINs allowed per client address ...
 PIN_WINDOW_S = 60.0  # ... within this many seconds
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,39}$")
@@ -87,10 +88,25 @@ class PhoneCamera:
         self.name = name
         self._on_release = on_release
         # One tuple, swapped atomically, so put() and grab() need no lock.
-        self._latest: tuple[bytes, float] | None = None
+        self._latest: tuple[bytes, float] | None = None  # small preview, ~1/s
+        # The photo handshake has three fields that must change together, so it gets
+        # a lock: a late photo landing while a new grab() resets them would otherwise
+        # leave that grab waiting for a request the phone never sees.
+        self._photo_lock = threading.Lock()
+        self._photo: bytes | None = None  # full resolution, only when asked for
+        self._photo_ready = threading.Event()
+        self.photo_wanted = False  # read by the frame handler, reported to the phone
 
-    def put(self, jpeg: bytes) -> None:
-        self._latest = (jpeg, time.monotonic())
+    def put(self, jpeg: bytes, photo: bool = False) -> None:
+        if not photo:
+            self._latest = (jpeg, time.monotonic())
+            return
+        with self._photo_lock:
+            if not self.photo_wanted:
+                return  # nobody is waiting (a late photo): drop it
+            self._photo = jpeg
+            self.photo_wanted = False
+            self._photo_ready.set()
 
     def grab(self) -> np.ndarray:
         latest = self._latest
@@ -103,10 +119,28 @@ class PhoneCamera:
                 f"Phone camera '{self.name}' last sent a frame {age:.0f}s ago. "
                 "Is the page still open on the phone?"
             )
-        frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
-        if frame is None:
-            raise RuntimeError(f"Phone camera '{self.name}' sent an undecodable image.")
-        return frame
+        # Ask the phone for a full-resolution photo: the next preview post carries the
+        # request and the phone answers with the photo. Fall back to the preview if it
+        # does not arrive in time (slow Wi-Fi) rather than failing the call.
+        # ponytail: one waiter at a time; a second concurrent grab() shares the photo.
+        with self._photo_lock:
+            self._photo = None
+            self._photo_ready.clear()
+            self.photo_wanted = True
+        arrived = self._photo_ready.wait(HIRES_TIMEOUT_S)
+        with self._photo_lock:
+            photo, self.photo_wanted = self._photo, False
+        if arrived and photo:
+            try:
+                return _decode(self.name, photo)
+            except RuntimeError as e:
+                logger.warning(f"{e} Returning the latest preview instead.")
+        else:
+            logger.warning(
+                f"Phone camera '{self.name}' did not send a photo within "
+                f"{HIRES_TIMEOUT_S:.0f}s; returning the latest preview instead."
+            )
+        return _decode(self.name, jpeg)
 
     @property
     def config(self) -> dict:
@@ -117,6 +151,13 @@ class PhoneCamera:
 
     def release(self) -> None:
         self._on_release(self.name)
+
+
+def _decode(name: str, jpeg: bytes) -> np.ndarray:
+    frame = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise RuntimeError(f"Phone camera '{name}' sent an undecodable image.")
+    return frame
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -324,13 +365,16 @@ class PhoneCameraServer:
         camera = self.registry.get(name)
         if not isinstance(camera, PhoneCamera):
             return _error(404, "Unknown phone camera. Register it first.")
+        kind = request.query_params.get("kind", "preview")
+        if kind not in ("preview", "photo"):
+            return _error(422, "kind must be 'preview' or 'photo'.")
         body = await _read_capped(request, MAX_FRAME_BYTES)
         if body is None:
             return _error(413, "Frame is too large.")
         if body[:2] != b"\xff\xd8":
             return _error(400, "Frame must be a JPEG image.")
-        camera.put(body)
-        return JSONResponse({"hires_requested": False})
+        camera.put(body, photo=kind == "photo")
+        return JSONResponse({"hires_requested": camera.photo_wanted})
 
     def start(self, host: str = "0.0.0.0", port: int = 8443) -> str | None:
         """Start serving. Returns the URL for phones, or None if the port is taken."""
