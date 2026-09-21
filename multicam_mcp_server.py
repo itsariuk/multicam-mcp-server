@@ -16,6 +16,8 @@ from framegrab.config import (
 )
 from mcp.server.fastmcp import FastMCP, Image
 
+from multicam_mcp_phone import PhoneCameraServer
+
 logger = logging.getLogger(__name__)
 
 ENABLE_FRAMEGRAB_AUTO_DISCOVERY = (
@@ -25,6 +27,11 @@ FRAMEGRAB_RTSP_AUTO_DISCOVERY_MODE = os.getenv(
     "FRAMEGRAB_RTSP_AUTO_DISCOVERY_MODE",
     "off",  # "off", "ip_only", "light", "complete_fast", "complete_slow"
 )
+ENABLE_FRAMEGRAB_PHONE_CAMERAS = (
+    os.getenv("ENABLE_FRAMEGRAB_PHONE_CAMERAS", "false").lower() == "true"
+)
+# Parsed only when phone cameras start, so a bad value cannot stop the MCP server.
+FRAMEGRAB_PHONE_CAMERAS_PORT = os.getenv("FRAMEGRAB_PHONE_CAMERAS_PORT") or "8443"
 
 # Cache to store created FrameGrabbers, maps name to FrameGrabber
 _grabber_cache = {}
@@ -43,11 +50,21 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[Any]:
         except Exception:
             logger.error("Error autodiscovering framegrabbers.", exc_info=True)
 
-    logger.info("Framegrab MCP server has started, listening for requests...")
+    phone_server = None
+    if ENABLE_FRAMEGRAB_PHONE_CAMERAS:
+        try:
+            phone_server = PhoneCameraServer(_grabber_cache)
+            phone_server.start(port=int(FRAMEGRAB_PHONE_CAMERAS_PORT))
+        except Exception:
+            logger.error("Error starting phone camera server.", exc_info=True)
+
+    logger.info("Multicam MCP server has started, listening for requests...")
 
     yield {}
 
-    logger.info("Framegrab MCP server is stopping, releasing framegrabbers...")
+    logger.info("Multicam MCP server is stopping, releasing framegrabbers...")
+    if phone_server:
+        phone_server.stop()
     for _, grabber in _grabber_cache.items():
         try:
             grabber.release()
@@ -57,7 +74,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[Any]:
 
 
 mcp = FastMCP(
-    "framegrab",
+    "multicam",
     dependencies=[
         "framegrab>=0.11.0",
         "opencv-python",

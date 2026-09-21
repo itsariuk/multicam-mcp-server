@@ -1,0 +1,10 @@
+multicam-mcp-server
+Copyright 2026 Ilya Tsaryuk
+
+This product is a fork of framegrab-mcp-server
+(https://github.com/groundlight/framegrab-mcp-server)
+Copyright Groundlight AI, licensed under the Apache License, Version 2.0.
+
+Changes made in this fork:
+- Renamed the project, package, modules, and MCP server from "framegrab" to "multicam".
+- Added phone browser cameras (multicam_mcp_phone.py, multicam_mcp_phone.html).

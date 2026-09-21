@@ -1,56 +1,73 @@
-# framegrab-mcp-server
+# multicam-mcp-server
 
-## Overview
-A Model Context Protocol (MCP) server for capturing images from cameras and video streams. Uses the [framegrab](https://github.com/groundlight/framegrab) library to handle the actual image capture.
+A Model Context Protocol (MCP) server that lets an AI agent look through several cameras at once. Put a phone on each workbench, give each one a name, and ask your agent to "look at the left bench". It also captures from webcams, USB cameras, RTSP streams, YouTube live streams, and anything else the [framegrab](https://github.com/groundlight/framegrab) library supports.
 
-This server can be used to capture images from a webcam, a USB camera, an RTSP stream, a youtube live stream, or any other video source supported by the framegrab library.
+Phones join from their browser. There is no app to install.
 
-![Framegrab MCP Server in action](assets/framegrab-mcp-in-action.png)
+<p>
+  <img src="assets/phone-camera-page.png" width="300" alt="The phone camera page in Chrome on Android, live as 'left bench'">
+  <img src="assets/phone-camera-frame.jpg" width="300" alt="The frame the agent received from grab_frame at the same moment">
+</p>
 
-This MCP server is still in early development. The functionality and available tools are subject to change and expansion as we continue to develop and improve the server.
+*Left: the page on the phone. Right: what the agent got back from `grab_frame("left bench")` at the same moment (full size is 2160×4080).*
 
-### Tools
-The following tools are available in the Framegrab MCP server:
+### Credits
+multicam-mcp-server is a fork of [framegrab-mcp-server](https://github.com/groundlight/framegrab-mcp-server) by [Groundlight AI](https://www.groundlight.ai/), which provides the MCP server and all of the framegrabber tools. This fork renames the project and adds phone browser cameras. Both are licensed under Apache-2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-- **create_framegrabber**: Create a new framegrabber from a configuration object and add it to the available grabbers.
-- **grab_frame**: Grab a frame from the specified framegrabber and return it as an image in the desired format (png, jpg, or webp).
-- **list_framegrabbers**: List all available framegrabbers by name, sorted alphanumerically.
-- **get_framegrabber_config**: Retrieve the configuration of a specific framegrabber.
-- **set_framegrabber_config**: Update the configuration options for a specific framegrabber.
-- **release_framegrabber**: Release a framegrabber and remove it from the available grabbers.
+This project is in early development. Tools and behaviour may change.
 
-### Resources
-The following resources are available in the Framegrab MCP server:
+## Quick start
 
-- **framegrabbers**: Lists all available framegrabbers by name, sorted alphanumerically.
+The server runs over stdio and is started by your MCP client. You need [uv](https://docs.astral.sh/uv/). The first start downloads the dependencies and can take a while.
 
-## Configuration
+### Codex
+```bash
+codex mcp add multicam --env ENABLE_FRAMEGRAB_PHONE_CAMERAS=true -- \
+  uvx --from git+https://github.com/itsariuk/multicam-mcp-server multicam-mcp-server
+```
 
-### Usage with Claude Desktop
-Add this to your claude_desktop_config.json:
+Or in `~/.codex/config.toml`:
+```toml
+[mcp_servers.multicam]
+command = "uvx"
+args = ["--from", "git+https://github.com/itsariuk/multicam-mcp-server", "multicam-mcp-server"]
+
+[mcp_servers.multicam.env]
+ENABLE_FRAMEGRAB_PHONE_CAMERAS = "true"
+```
+
+### Claude Desktop
+Add this to your `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "framegrab": {
+    "multicam": {
       "command": "uvx",
       "args": [
-        "framegrab-mcp-server"
-      ]
+        "--from",
+        "git+https://github.com/itsariuk/multicam-mcp-server",
+        "multicam-mcp-server"
+      ],
+      "env": {
+        "ENABLE_FRAMEGRAB_PHONE_CAMERAS": "true"
+      }
     }
   }
 }
 ```
 
-### Usage with Zed
-Add the following to your zed `settings.json`:
+### Zed
+Add this to your Zed `settings.json`:
 ```json
 {
   "context_servers": {
-    "framegrab": {
+    "multicam": {
       "command": {
         "path": "uvx",
         "args": [
-          "framegrab-mcp-server"
+          "--from",
+          "git+https://github.com/itsariuk/multicam-mcp-server",
+          "multicam-mcp-server"
         ]
       }
     }
@@ -58,27 +75,93 @@ Add the following to your zed `settings.json`:
 }
 ```
 
-### (experimental) Enabling autodiscovery of framegrabbers
-Enable autodiscovery of framegrabbers (such as your webcam or usb cameras) by setting
-`ENABLE_FRAMEGRAB_AUTO_DISCOVERY="true"` in your environment variables. This will automatically add any discovered framegrabbers to the list of available framegrabbers.
+Leave out `ENABLE_FRAMEGRAB_PHONE_CAMERAS` if you only want cameras attached to the computer. Phone cameras are off unless you turn them on, because they open a port on your network. See [Security](#security).
 
-If autodiscovery is enabled, then you can also configure how RTSP autodiscovery works by changing `FRAMEGRAB_RTSP_AUTO_DISCOVERY_MODE`. By default, it is set to `"off"`, which disables RTSP autodiscovery. For a thorough attempt at autodiscovery, set it to `"complete_fast"`.
+## Phone cameras (experimental)
 
-```json
-{
-  "mcpServers": {
-    "framegrab": {
-      "command": "uvx",
-      "args": [
-        "framegrab-mcp-server"
-      ],
-      "env": {
-        "ENABLE_FRAMEGRAB_AUTO_DISCOVERY": "true",
-        "FRAMEGRAB_RTSP_AUTO_DISCOVERY_MODE": "complete_fast"
-      }
-    }
-  }
-}
+With `ENABLE_FRAMEGRAB_PHONE_CAMERAS="true"`, the server also serves a small web page over HTTPS on port 8443.
+
+1. Put the phone on the same network as the computer and open `https://<your-computer's-ip>:8443/`. The exact address is written to the server log at startup.
+2. Accept the browser's certificate warning. The server makes its own self-signed certificate, because browsers only allow camera access over HTTPS. You do this once per phone. It will ask again if your computer's IP address changes.
+3. Allow camera access, type a name such as `left bench`, and tap **Start**.
+4. Prop the phone up and plug it into a charger.
+
+The name now works like any other framegrabber. Ask the agent to list cameras or to look at `left bench`. Repeat on more phones with different names.
+
+What to expect:
+
+| Situation | What happens |
+|-----------|--------------|
+| Agent calls `grab_frame` | It gets the latest frame. The phone sends one full-resolution frame per second. |
+| Agent calls `release_grabber` | The page stops sending and says so. Tap **Start** to rejoin. |
+| The MCP client restarts the server | The page reconnects by itself under the same name. You don't need to touch the phone. |
+| The page is closed or in the background, the phone sleeps, or another app takes the camera | The page stops sending, and `grab_frame` returns an error saying how long ago the last frame arrived, not an old image. Sending resumes by itself when the page is back on screen. |
+| The page is open in two tabs | Only one tab can use the camera. The second tab tells you after a few seconds. |
+| A name is already used by a USB or RTSP camera | The page shows an error. Pick another name. |
+
+On the page you can switch between the front and back camera. Where the browser supports it, you can also turn on the torch. The page asks the phone to keep the screen on while it is live.
+
+### Security
+**There is no authentication yet.** While phone cameras are enabled, anyone on your network can open the page and register a camera, or replace the picture of an existing one by using the same name. Only enable this on networks you trust. A PIN is planned.
+
+Frames stay on your network. They go from the phone to your computer and nowhere else.
+
+### Tested with
+Chrome on Android. Safari on iOS has not been tested yet.
+
+## Cameras and streams on the computer
+
+Ask the agent to create a framegrabber for a webcam, a USB camera, an RTSP URL, a YouTube live stream, an HLS stream, a video file, a RealSense camera, or a Basler camera. It then grabs frames from it by name.
+
+![Claude Desktop creating a framegrabber for a YouTube live stream and grabbing a frame](assets/framegrab-mcp-in-action.png)
+
+*Screenshot from the original framegrab-mcp-server.*
+
+### (experimental) Autodiscovery
+Set `ENABLE_FRAMEGRAB_AUTO_DISCOVERY="true"` to add webcams and USB cameras automatically at startup.
+
+With autodiscovery on, `FRAMEGRAB_RTSP_AUTO_DISCOVERY_MODE` controls the search for RTSP cameras. The default is `"off"`. For a thorough search, use `"complete_fast"`. This makes the server slower to start.
+
+## Tools
+
+| Tool | What it does |
+|------|--------------|
+| `create_framegrabber` | Create a framegrabber from a configuration object and add it to the available grabbers. |
+| `grab_frame` | Grab a frame from a framegrabber and return it as an image (`png`, `jpg`, or `webp`). |
+| `list_framegrabbers` | List all available framegrabbers by name, including phone cameras. |
+| `get_framegrabber_config` | Return the configuration of a framegrabber. |
+| `set_config` | Update the configuration options of a framegrabber. Phone cameras have no options. |
+| `release_grabber` | Release a framegrabber and remove it from the available grabbers. |
+
+### Resources
+- `fg://framegrabbers`: all available framegrabbers by name.
+
+## Configuration
+
+All settings are environment variables.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `ENABLE_FRAMEGRAB_PHONE_CAMERAS` | `false` | Serve the phone camera page. |
+| `FRAMEGRAB_PHONE_CAMERAS_PORT` | `8443` | HTTPS port for the phone camera page. If the port is taken, phone cameras are turned off for that run and the rest of the server works as usual. |
+| `ENABLE_FRAMEGRAB_AUTO_DISCOVERY` | `false` | Discover webcams and USB cameras at startup. |
+| `FRAMEGRAB_RTSP_AUTO_DISCOVERY_MODE` | `off` | One of `off`, `ip_only`, `light`, `complete_fast`, `complete_slow`. |
+
+The self-signed certificate and its key are kept in your user data directory (on Linux, `~/.local/share/multicam-mcp-server/`). Delete that directory to make a new certificate.
+
+## Development
+
+```bash
+uv sync --extra dev
+uv run pytest -q                 # tests
+make mcp-inspector               # try the tools in the MCP inspector
+make run-server                  # run the server over stdio
+make build                       # build the wheel
 ```
 
-This will increase server startup time.
+The phone camera server lives in `multicam_mcp_phone.py`, and the page is `multicam_mcp_phone.html`. `multicam_mcp_server.py` holds the MCP tools.
+
+## Roadmap
+- A PIN and a QR code for joining, plus a tool that lets the agent show them to you.
+- Full-resolution capture on demand, with a smaller preview the rest of the time.
+- Testing on iOS Safari.

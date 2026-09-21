@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>multicam phone camera</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 0 auto; padding: 16px; max-width: 480px; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  label { display: block; margin: 12px 0 4px; }
+  input, select, button { font: inherit; font-size: 16px; min-height: 44px; box-sizing: border-box; }
+  input, select { width: 100%; padding: 8px; }
+  .row { display: flex; gap: 8px; margin: 16px 0; }
+  .row button { flex: 1; padding: 8px 16px; }
+  #status { min-height: 1.4em; margin: 12px 0; }
+  video { width: 100%; background: #000; border-radius: 8px; }
+</style>
+</head>
+<body>
+<h1>Phone camera</h1>
+
+<label for="name">Camera name</label>
+<input id="name" maxlength="40" autocomplete="off" autocapitalize="off" placeholder="left bench">
+
+<label for="device">Camera</label>
+<select id="device" disabled><option>Available after Start</option></select>
+
+<div class="row">
+  <button id="start" type="button">Start</button>
+  <button id="torch" type="button" aria-pressed="false" hidden>Torch</button>
+</div>
+
+<p id="status" role="status" aria-live="polite"></p>
+<video id="video" playsinline autoplay muted></video>
+
+<script>
+const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 _-]{0,39}$/;
+const SEND_EVERY_MS = 1000;
+const $ = id => document.getElementById(id);
+const nameInput = $('name'), deviceSelect = $('device'), startBtn = $('start'),
+      torchBtn = $('torch'), video = $('video');
+const canvas = document.createElement('canvas');
+let stream = null, track = null, running = false, sent = 0, name = '';
+let lastFrameTime = -1;  // video.currentTime of the last frame we sent
+let session = 0;  // bumped on every Start, so a send loop left over from an earlier session exits
+
+const status = text => { $('status').textContent = text; };
+// localStorage can throw (private mode, blocked site data); the page must work without it.
+const load = key => { try { return localStorage.getItem(key); } catch (e) { return null; } };
+const store = (key, value) => { try { localStorage.setItem(key, value); } catch (e) {} };
+
+nameInput.value = load('name') || '';
+if (!window.isSecureContext || !navigator.mediaDevices) {
+  status('This page needs HTTPS. Open the https:// address and accept the certificate warning.');
+  startBtn.disabled = true;
+}
+
+function stopAll() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = track = null;
+  video.srcObject = null;
+  torchBtn.hidden = true;
+  deviceSelect.disabled = true;
+}
+
+// The one way out of a live session: stop sending, free the camera, and say why.
+function halt(message) {
+  running = false;
+  stopAll();
+  startBtn.disabled = false;
+  nameInput.disabled = false;
+  status(message);
+}
+
+async function openCamera(deviceId) {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  // Drop the old picture now: a stopped stream leaves its last frame in the <video>, and
+  // the send loop must never upload that as if it were live.
+  video.srcObject = null;
+  const size = {width: {ideal: 4096}, height: {ideal: 2160}};
+  try {
+    stream = await navigator.mediaDevices.getUserMedia(
+      {video: deviceId ? {deviceId: {exact: deviceId}, ...size} : {facingMode: 'environment', ...size}});
+  } catch (e) {
+    // A remembered deviceId can be stale (other browser profile, cleared site data).
+    if (!deviceId || (e.name !== 'OverconstrainedError' && e.name !== 'NotFoundError')) throw e;
+    stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'environment', ...size}});
+  }
+  video.srcObject = stream;
+  await video.play();
+  track = stream.getVideoTracks()[0];
+  const opened = track;
+  // Fires when the camera is taken away (another app, permission revoked), not on our own stop().
+  track.onended = () => { if (running && track === opened) halt('The camera stopped. Tap Start to try again.'); };
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  torchBtn.hidden = !('torch' in caps);
+  torchBtn.setAttribute('aria-pressed', 'false');
+  torchBtn.textContent = 'Torch';
+}
+
+async function listCameras() {
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+  const active = track.getSettings().deviceId;
+  deviceSelect.replaceChildren(...devices.map((d, i) => {
+    const option = new Option(d.label || 'Camera ' + (i + 1), d.deviceId);
+    option.selected = d.deviceId === active;
+    return option;
+  }));
+  deviceSelect.disabled = devices.length < 2;
+}
+
+async function register() {
+  const res = await fetch('/api/cameras', {
+    method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({name})});
+  if (res.ok) return null;
+  const body = await res.json().catch(() => ({}));
+  return body.error || 'Could not register (' + res.status + ').';
+}
+
+function requestWakeLock() {
+  if ('wakeLock' in navigator) navigator.wakeLock.request('screen').catch(() => {});
+}
+
+async function start() {
+  name = nameInput.value.trim();
+  if (!NAME_RE.test(name)) { status('Name must be 1-40 letters, digits, spaces, _ or -.'); return; }
+  // Single-shot: a second tap would re-assign srcObject and abort the first play().
+  startBtn.disabled = true;
+  nameInput.disabled = true;
+  status('Starting camera…');
+  // Chrome gives the camera to one tab at a time; a second tab just waits, silently.
+  const hint = setTimeout(() => status('Waiting for the camera… is this page open in another tab?'), 5000);
+  try {
+    await openCamera(load('deviceId'));
+    clearTimeout(hint);
+    await listCameras();
+    const error = await register();
+    if (error) throw new Error(error);
+    store('name', name);
+    requestWakeLock();
+    sent = 0;
+    lastFrameTime = -1;
+    running = true;
+    loop(++session);
+  } catch (e) {
+    clearTimeout(hint);
+    halt(e.name === 'NotAllowedError' ? 'Camera permission was denied. Allow it in the browser settings and tap Start.'
+       : e.name === 'Error' ? e.message : e.name + ': ' + e.message);
+  }
+}
+
+// Self-scheduling rather than setInterval, so slow Wi-Fi cannot pile up requests.
+async function loop(mySession) {
+  if (!running || mySession !== session) return;
+  try {
+    // When another app takes the camera the track still says "live" and unmuted, and the
+    // <video> keeps showing its last frame. currentTime standing still is the only sign,
+    // and we must not upload that frozen frame as if it were new.
+    if (video.videoWidth && video.currentTime === lastFrameTime) {
+      status(document.visibilityState === 'hidden'
+        ? 'Paused while this page is in the background.'
+        : 'No new picture from the camera. Is another app using it?');
+    } else if (video.videoWidth) {  // 0 while switching cameras; toBlob would yield null
+      lastFrameTime = video.currentTime;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext('2d').drawImage(video, 0, 0);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+      const res = await fetch('/api/cameras/' + encodeURIComponent(name) + '/frame', {method: 'POST', body: blob});
+      if (res.status === 404) {
+        // The server restarted and forgot us: rejoin silently. If it refuses (the name was
+        // taken meanwhile, too many cameras), stop rather than claim to be live.
+        const error = await register();
+        if (error) { halt(error); return; }
+      } else if (res.status === 410) {
+        halt('Released by the agent. Tap Start to rejoin.');
+        return;
+      } else if (res.ok) {
+        status('Live as "' + name + '" · ' + (++sent) + ' frames sent');
+      } else {
+        status('Server rejected the frame (' + res.status + ').');
+      }
+    }
+  } catch (e) {
+    status('Reconnecting… (' + e.message + ')');
+  }
+  setTimeout(() => loop(mySession), SEND_EVERY_MS);
+}
+
+startBtn.addEventListener('click', start);
+
+deviceSelect.addEventListener('change', async () => {
+  store('deviceId', deviceSelect.value);
+  try { await openCamera(deviceSelect.value); }
+  catch (e) { halt('Could not switch camera (' + e.name + '). Tap Start to try again.'); }
+});
+
+torchBtn.addEventListener('click', async () => {
+  const on = torchBtn.getAttribute('aria-pressed') !== 'true';
+  try {
+    await track.applyConstraints({advanced: [{torch: on}]});
+    torchBtn.setAttribute('aria-pressed', String(on));
+    torchBtn.textContent = on ? 'Torch on' : 'Torch';
+  } catch (e) {
+    torchBtn.hidden = true;
+  }
+});
+
+// A screen wake lock is dropped whenever the page is hidden; take it again on return.
+document.addEventListener('visibilitychange', () => {
+  if (running && document.visibilityState === 'visible') requestWakeLock();
+});
+</script>
+</body>
+</html>
