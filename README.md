@@ -5,8 +5,8 @@ Give Codex or another MCP client on-demand snapshots from several named cameras.
 Phone cameras join from a browser—there is no phone app to install. The server also works with webcams, USB cameras, RTSP and HLS streams, YouTube live streams, video files, RealSense cameras, Basler cameras, and other inputs supported by [framegrab](https://github.com/groundlight/framegrab).
 
 <p>
-  <img src="assets/phone-camera-page.png" width="300" alt="The phone camera page live as the named camera 'overhand', showing capture diagnostics and an uncropped preview">
-  <img src="assets/phone-camera-frame.jpg" width="300" alt="A full-resolution still captured on demand from the same phone camera">
+  <img src="assets/phone-camera-overhand-live-2026-09.png" width="300" alt="The phone camera page live as the named camera 'overhand', showing capture diagnostics and an uncropped preview">
+  <img src="assets/phone-camera-overhand-still-2026-09.jpg" width="300" alt="A full-resolution still captured on demand from the same phone camera">
 </p>
 
 *Left: the current Android phone page and its full-view preview. Right: an on-demand native still from the same scene. This test phone advertised 3064×4080; dimensions vary by device and camera.*
@@ -53,53 +53,11 @@ url = "http://127.0.0.1:8000/mcp"
 
 Restart Codex or reload its MCP configuration. The first `uvx` start downloads dependencies and can take a while.
 
-### STDIO: a supported single-client alternative
-
-For one MCP client, it is also fine to let the client launch the server over STDIO:
-
-```bash
-codex mcp add multicam --env ENABLE_FRAMEGRAB_PHONE_CAMERAS=true -- \
-  uvx --from git+https://github.com/itsariuk/multicam-mcp-server multicam-mcp-server
-```
-
-Equivalent Codex configuration:
-
-```toml
-[mcp_servers.multicam]
-command = "uvx"
-args = ["--from", "git+https://github.com/itsariuk/multicam-mcp-server", "multicam-mcp-server"]
-
-[mcp_servers.multicam.env]
-ENABLE_FRAMEGRAB_PHONE_CAMERAS = "true"
-```
-
-Do not use that STDIO configuration from several clients at once. Each connection launches another process with its own in-memory camera registry and PIN. Only one process can bind phone HTTPS port `8443`, so tool calls can land in a process that has neither the connected phone nor the listener. Use the shared HTTP setup whenever several Codex tasks or MCP clients need the cameras.
-
 Leave out `ENABLE_FRAMEGRAB_PHONE_CAMERAS` if you only need cameras attached to the computer. Phone cameras are opt-in because they open an HTTPS port on the local network.
 
-### Other MCP clients
+Clients that cannot connect to Streamable HTTP can still launch the server over STDIO. That compatibility mode is intended for one client; see [STDIO compatibility](docs/stdio-compatibility.md) for its setup and limitations.
 
-Clients that support remote Streamable HTTP can use `http://127.0.0.1:8000/mcp`. For a single-client STDIO setup, use the same `uvx` command. For example, Claude Desktop accepts:
-
-```json
-{
-  "mcpServers": {
-    "multicam": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/itsariuk/multicam-mcp-server",
-        "multicam-mcp-server"
-      ],
-      "env": {
-        "ENABLE_FRAMEGRAB_PHONE_CAMERAS": "true"
-      }
-    }
-  }
-}
-```
-
-## Add phone cameras (experimental)
+## Add phone cameras
 
 With `ENABLE_FRAMEGRAB_PHONE_CAMERAS=true`, the server provides a small phone page over HTTPS.
 
