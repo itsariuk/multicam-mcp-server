@@ -100,7 +100,14 @@ async function openCamera(deviceId) {
   // Drop the old picture now: a stopped stream leaves its last frame in the <video>, and
   // the send loop must never upload that as if it were live.
   video.srcObject = null;
-  const size = {width: {ideal: 4096}, height: {ideal: 2160}};
+  // Ask for the largest uncropped camera mode. `resizeMode: none` is exact on purpose:
+  // silently accepting `crop-and-scale` would lose the sensor edges. Width and height
+  // are landscape-oriented constraints; Chrome rotates them with a portrait phone.
+  const size = {
+    width: {ideal: 4080},
+    height: {ideal: 3064},
+    resizeMode: {exact: 'none'},
+  };
   try {
     stream = await navigator.mediaDevices.getUserMedia(
       {video: deviceId ? {deviceId: {exact: deviceId}, ...size} : {facingMode: 'environment', ...size}});

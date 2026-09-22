@@ -135,7 +135,7 @@ What to expect:
 
 While nobody is requesting a snapshot, the phone targets one small preview per second instead of continuously uploading full-resolution images.
 
-On browsers that support the Image Capture API, an on-demand snapshot uses the maximum native still-image dimensions and aspect ratio advertised by the phone. The server does not crop, stretch, or resize that photo. Other browsers fall back to the complete video frame exposed by `getUserMedia`; the browser or phone camera stack may itself crop that stream before the page receives it.
+The page requires an uncropped `getUserMedia` mode (`resizeMode: none`) and downscales previews without changing their aspect ratio, so the preview keeps every edge exposed by the camera track. It does not silently accept the browser's cropped video mode. On browsers that also support the Image Capture API, an on-demand snapshot uses the maximum native still-image dimensions and aspect ratio advertised by the phone. The server does not crop, stretch, or resize that photo. Other browsers fall back to the complete uncropped video frame.
 
 On the page you can switch between the front and back camera. Where the browser supports it, you can also turn on the torch. The page asks the phone to keep the screen on while it is live.
 

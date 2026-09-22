@@ -59,6 +59,7 @@ def test_page_is_served(ctx):
 def test_page_reports_client_timing_and_avoids_reallocating_same_canvas(ctx):
     page = ctx[1].get("/").text
     assert 'id="diagnostics"' in page
+    assert "resizeMode: {exact: 'none'}" in page
     assert "canvas.width !== width || canvas.height !== height" in page
     assert "encode ' + ms(captureMs)" in page
     assert "upload ' + ms(uploadMs)" in page
