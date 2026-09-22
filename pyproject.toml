@@ -7,7 +7,7 @@ requires-python = ">=3.10"
 authors = [{ name = "Groundlight AI" }, { name = "Ilya Tsaryuk" }]
 license = { text = "Apache-2.0" }
 dependencies = [
-    "mcp[cli]",
+    "mcp[cli]>=2.2,<3",
     "framegrab>=0.11.1",
     "pypylon",
     "streamlink",

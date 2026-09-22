@@ -35,6 +35,7 @@
 </div>
 
 <p id="status" role="status" aria-live="polite"></p>
+<p id="diagnostics"><small>Timing appears here while the camera is live.</small></p>
 <video id="video" playsinline autoplay muted></video>
 
 <script>
@@ -48,10 +49,12 @@ const $ = id => document.getElementById(id);
 const nameInput = $('name'), pinInput = $('pin'), deviceSelect = $('device'), startBtn = $('start'),
       torchBtn = $('torch'), video = $('video');
 const canvas = document.createElement('canvas');
-let stream = null, track = null, running = false, sent = 0, photos = 0, name = '';
+let stream = null, track = null, imageCapture = null, photoSettings = null;
+let running = false, sent = 0, photos = 0, name = '';
 let lastPreviewBytes = 0;  // not used by the page; read over remote debugging during soak tests
 let lastFrameTime = -1;  // video.currentTime of the last frame we sent
 let session = 0;  // bumped on every Start, so a send loop left over from an earlier session exits
+let lastLoopAt = 0, lastPreviewAt = 0, frozenChecks = 0;
 
 const status = text => { $('status').textContent = text; };
 // localStorage can throw (private mode, blocked site data); the page must work without it.
@@ -76,6 +79,7 @@ if (!window.isSecureContext || !navigator.mediaDevices) {
 function stopAll() {
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = track = null;
+  imageCapture = photoSettings = null;
   video.srcObject = null;
   torchBtn.hidden = true;
   deviceSelect.disabled = true;
@@ -108,6 +112,18 @@ async function openCamera(deviceId) {
   video.srcObject = stream;
   await video.play();
   track = stream.getVideoTracks()[0];
+  if ('ImageCapture' in window) {
+    try {
+      imageCapture = new ImageCapture(track);
+      const photoCaps = await imageCapture.getPhotoCapabilities();
+      photoSettings = {
+        imageWidth: photoCaps.imageWidth.max,
+        imageHeight: photoCaps.imageHeight.max,
+      };
+    } catch (e) {
+      imageCapture = photoSettings = null;
+    }
+  }
   const opened = track;
   // Fires when the camera is taken away (another app, permission revoked), not on our own stop().
   track.onended = () => { if (running && track === opened) halt('The camera stopped. Tap Start to try again.'); };
@@ -168,6 +184,8 @@ async function start() {
     sent = 0;
     photos = 0;
     lastFrameTime = -1;
+    lastLoopAt = lastPreviewAt = 0;
+    frozenChecks = 0;
     running = true;
     loop(++session);
   } catch (e) {
@@ -180,10 +198,38 @@ async function start() {
 // Draw the current video frame, scaled so its long edge is at most longEdge (0 = full size).
 function capture(longEdge, quality) {
   const scale = longEdge ? Math.min(1, longEdge / Math.max(video.videoWidth, video.videoHeight)) : 1;
-  canvas.width = Math.round(video.videoWidth * scale);
-  canvas.height = Math.round(video.videoHeight * scale);
+  const width = Math.round(video.videoWidth * scale);
+  const height = Math.round(video.videoHeight * scale);
+  // Assigning either dimension clears the canvas and reallocates its backing store. Most
+  // captures have the same preview size, so only resize when the dimensions really change.
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
   canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
   return new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+}
+
+// Prefer the camera's native still-photo path: unlike the video track copied by the
+// canvas, it can expose the sensor's full still-image aspect and maximum dimensions.
+// Browsers without ImageCapture keep the existing full-video-frame fallback.
+async function capturePhoto() {
+  if (imageCapture) {
+    try { return await imageCapture.takePhoto(photoSettings || undefined); }
+    catch (e) {}
+  }
+  return capture(0, PHOTO_QUALITY);
+}
+
+const ms = value => Math.round(value) + 'ms';
+function showDiagnostics(loopGap, sendGap, captureMs, uploadMs, videoDelta) {
+  const heap = performance.memory ? ' · heap ' + Math.round(performance.memory.usedJSHeapSize / 1048576) + 'MB' : '';
+  $('diagnostics').textContent =
+    'Timing: send ' + (sendGap ? (sendGap / 1000).toFixed(1) + 's' : 'first') +
+    ' · loop ' + (loopGap ? ms(loopGap) : 'first') +
+    ' · encode ' + ms(captureMs) + ' · upload ' + ms(uploadMs) +
+    ' · video +' + videoDelta.toFixed(2) + 's · skipped ' + frozenChecks +
+    ' · ' + document.visibilityState + heap;
 }
 
 // Upload one image. Returns the server's JSON on success, {} when there is nothing to act
@@ -217,26 +263,48 @@ async function send(blob, kind) {
 // Self-scheduling rather than setInterval, so slow Wi-Fi cannot pile up requests.
 async function loop(mySession) {
   if (!running || mySession !== session) return;
+  const loopStarted = performance.now();
+  const loopGap = lastLoopAt ? loopStarted - lastLoopAt : 0;
+  lastLoopAt = loopStarted;
   try {
     // When another app takes the camera the track still says "live" and unmuted, and the
     // <video> keeps showing its last frame. currentTime standing still is the only sign,
     // and we must not upload that frozen frame as if it were new.
     if (video.videoWidth && video.currentTime === lastFrameTime) {
+      frozenChecks++;
+      $('diagnostics').textContent =
+        'Timing: loop ' + (loopGap ? ms(loopGap) : 'first') + ' · no new video frame' +
+        ' · skipped ' + frozenChecks + ' · ' + document.visibilityState;
       status(document.visibilityState === 'hidden'
         ? 'Paused while this page is in the background.'
         : 'No new picture from the camera. Is another app using it?');
     } else if (video.videoWidth) {  // 0 while switching cameras; toBlob would yield null
+      const previousFrameTime = lastFrameTime;
       lastFrameTime = video.currentTime;
+      const captureStarted = performance.now();
       const preview = await capture(PREVIEW_LONG_EDGE, PREVIEW_QUALITY);
+      const capturedAt = performance.now();
       lastPreviewBytes = preview.size;
+      const uploadStarted = performance.now();
       const reply = await send(preview, 'preview');
+      const uploadedAt = performance.now();
       if (!reply) return;  // halted: do not reschedule
+      const sendGap = lastPreviewAt ? uploadedAt - lastPreviewAt : 0;
+      lastPreviewAt = uploadedAt;
+      showDiagnostics(
+        loopGap,
+        sendGap,
+        capturedAt - captureStarted,
+        uploadedAt - uploadStarted,
+        previousFrameTime < 0 ? 0 : lastFrameTime - previousFrameTime,
+      );
+      frozenChecks = 0;
       if ('hires_requested' in reply) {
         status('Live as "' + name + '" · ' + (++sent) + ' frames sent' + (photos ? ' · ' + photos + ' photos' : ''));
       }
       if (reply.hires_requested && video.videoWidth) {  // 0 if a camera switch just began
         // The agent is waiting on grab_frame: answer with a full-resolution photo now.
-        const photo = await send(await capture(0, PHOTO_QUALITY), 'photo');
+        const photo = await send(await capturePhoto(), 'photo');
         if (!photo) return;
         if ('hires_requested' in photo) photos++;
       }

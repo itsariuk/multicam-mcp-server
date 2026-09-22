@@ -14,7 +14,7 @@ from framegrab.config import (
     RTSPFrameGrabberConfig,
     YouTubeLiveFrameGrabberConfig,
 )
-from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.mcpserver import MCPServer, Image
 
 from multicam_mcp_phone import PhoneCameraServer
 
@@ -41,7 +41,7 @@ _phone_server: PhoneCameraServer | None = None
 
 
 @asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[Any]:
+async def app_lifespan(server: MCPServer) -> AsyncIterator[Any]:
     if ENABLE_FRAMEGRAB_AUTO_DISCOVERY:
         logger.info("Autodiscovering generic_usb and basler framegrabbers...")
         try:
@@ -78,7 +78,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[Any]:
     logger.info("Done.")
 
 
-mcp = FastMCP(
+mcp = MCPServer(
     "multicam",
     dependencies=[
         "framegrab>=0.11.0",
@@ -256,7 +256,15 @@ def framegrabbers() -> list[str]:
 
 
 def main():
-    mcp.run()
+    transport = os.getenv("MULTICAM_MCP_TRANSPORT", "stdio")
+    if transport == "streamable-http":
+        mcp.run(
+            transport="streamable-http",
+            host=os.getenv("MULTICAM_MCP_HOST", "127.0.0.1"),
+            port=int(os.getenv("MULTICAM_MCP_PORT", "8000")),
+        )
+    else:
+        mcp.run(transport=transport)
 
 
 if __name__ == "__main__":

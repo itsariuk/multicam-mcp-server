@@ -56,6 +56,16 @@ def test_page_is_served(ctx):
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
 
 
+def test_page_reports_client_timing_and_avoids_reallocating_same_canvas(ctx):
+    page = ctx[1].get("/").text
+    assert 'id="diagnostics"' in page
+    assert "canvas.width !== width || canvas.height !== height" in page
+    assert "encode ' + ms(captureMs)" in page
+    assert "upload ' + ms(uploadMs)" in page
+    assert "imageCapture.takePhoto(photoSettings || undefined)" in page
+    assert "return capture(0, PHOTO_QUALITY)" in page
+
+
 @pytest.mark.parametrize("name", ["", " x", "a" * 41, "../etc", "na/me", 5, None])
 def test_bad_names_rejected(ctx, name):
     assert ctx[1].post("/api/cameras", json={"name": name}).status_code == 422
@@ -325,6 +335,30 @@ def test_add_phone_camera_tool(tmp_path, monkeypatch):
     assert image.data[:4] == b"\x89PNG" and not opened
     srv.add_phone_camera()
     assert opened == [1]
+
+
+def test_main_defaults_to_stdio(monkeypatch):
+    import multicam_mcp_server as srv
+
+    calls = []
+    monkeypatch.delenv("MULTICAM_MCP_TRANSPORT", raising=False)
+    monkeypatch.setattr(srv.mcp, "run", lambda **kwargs: calls.append(kwargs))
+    srv.main()
+    assert calls == [{"transport": "stdio"}]
+
+
+def test_main_can_serve_streamable_http(monkeypatch):
+    import multicam_mcp_server as srv
+
+    calls = []
+    monkeypatch.setenv("MULTICAM_MCP_TRANSPORT", "streamable-http")
+    monkeypatch.setenv("MULTICAM_MCP_HOST", "127.0.0.7")
+    monkeypatch.setenv("MULTICAM_MCP_PORT", "8765")
+    monkeypatch.setattr(srv.mcp, "run", lambda **kwargs: calls.append(kwargs))
+    srv.main()
+    assert calls == [
+        {"transport": "streamable-http", "host": "127.0.0.7", "port": 8765}
+    ]
 
 
 def test_grab_asks_for_a_photo_and_returns_it(ctx):
