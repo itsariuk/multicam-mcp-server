@@ -1,0 +1,24 @@
+{
+  "name": "multicam",
+  "version": "0.1.0+codex.20260924024515",
+  "description": "Hands-on help with named phone cameras, label reading, and photo journals.",
+  "author": {
+    "name": "Ilya Tsaryuk"
+  },
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Multicam",
+    "shortDescription": "Show, discuss, and document hands-on work.",
+    "longDescription": "Use named phone cameras for requested snapshots, label reading, item journals and inventory, step-by-step documentation, and repairs with wide and close-up views. Pair photos with notes using available file tools. Clear capture cues help record the intended item or step. Continuous monitoring and precise measurement are not established capabilities. Native packages include the local camera service and runtime; phone and computer use the same local network.",
+    "developerName": "Ilya Tsaryuk",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": [
+      "Connect my phone camera.",
+      "Look at my workbench and help with the next step.",
+      "Record this step in my project journal."
+    ]
+  }
+}

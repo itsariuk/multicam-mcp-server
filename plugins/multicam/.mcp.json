@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "multicam": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/multicam-runtime/multicam-runtime",
+      "args": []
+    }
+  }
+}

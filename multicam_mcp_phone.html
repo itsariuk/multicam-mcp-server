@@ -19,11 +19,13 @@
 </head>
 <body>
 <h1>Phone camera</h1>
+<p>Ask Codex to open joining, then connect within 60 seconds. New phones need the PIN shown separately on the computer.</p>
+<p>The preview stays on this phone. One photo is sent only when Codex requests a snapshot.</p>
 
 <label for="name">Camera name</label>
 <input id="name" maxlength="40" autocomplete="off" autocapitalize="off" placeholder="left bench">
 
-<label for="pin">PIN <small>(shown on the computer; only needed the first time)</small></label>
+<label for="pin">PIN <small>(shown on the computer; required when joining)</small></label>
 <input id="pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code">
 
 <label for="device">Camera</label>
@@ -31,6 +33,7 @@
 
 <div class="row">
   <button id="start" type="button">Start</button>
+  <button id="stop" type="button" disabled>Stop camera</button>
   <button id="torch" type="button" aria-pressed="false" hidden>Torch</button>
 </div>
 
@@ -40,37 +43,28 @@
 
 <script>
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 _-]{0,39}$/;
-const SEND_EVERY_MS = 1000;
-// A small preview goes up once a second; a full-resolution photo only when the agent asks.
-const PREVIEW_LONG_EDGE = 1280;
-const PREVIEW_QUALITY = 0.7;
+const POLL_EVERY_MS = 500;
 const PHOTO_QUALITY = 0.92;
 const $ = id => document.getElementById(id);
 const nameInput = $('name'), pinInput = $('pin'), deviceSelect = $('device'), startBtn = $('start'),
       torchBtn = $('torch'), video = $('video');
 const canvas = document.createElement('canvas');
 let stream = null, track = null, imageCapture = null, photoSettings = null;
-let running = false, sent = 0, photos = 0, name = '';
-let lastPreviewBytes = 0;  // not used by the page; read over remote debugging during soak tests
-let lastFrameTime = -1;  // video.currentTime of the last frame we sent
-let session = 0;  // bumped on every Start, so a send loop left over from an earlier session exits
-let lastLoopAt = 0, lastPreviewAt = 0, frozenChecks = 0;
+let running = false, photos = 0, name = '', cameraToken = '';
+let lastFrameTime = -1;
+let session = 0;
 
 const status = text => { $('status').textContent = text; };
 // localStorage can throw (private mode, blocked site data); the page must work without it.
 const load = key => { try { return localStorage.getItem(key); } catch (e) { return null; } };
 const store = (key, value) => { try { localStorage.setItem(key, value); } catch (e) {} };
 const forget = key => { try { localStorage.removeItem(key); } catch (e) {} };
-// The token this phone was given for the current camera name, if it has joined before.
-const authHeaders = () => { const t = load('token:' + name); return t ? {authorization: 'Bearer ' + t} : {}; };
+// Session token stays in memory and is never placed in localStorage or a URL.
+const authHeaders = () => cameraToken ? {authorization: 'Bearer ' + cameraToken} : {};
 
 nameInput.value = load('name') || '';
-// The QR code carries the PIN in the URL fragment. Use it, then take it out of the address bar.
-const pinInUrl = location.hash.match(/pin=(\d{6})/);
-if (pinInUrl) {
-  pinInput.value = pinInUrl[1];
-  history.replaceState(null, '', location.pathname);
-}
+// Pairing credentials are never accepted from a URL.
+if (location.hash) history.replaceState(null, "", location.pathname + location.search);
 if (!window.isSecureContext || !navigator.mediaDevices) {
   status('This page needs HTTPS. Open the https:// address and accept the certificate warning.');
   startBtn.disabled = true;
@@ -88,6 +82,7 @@ function stopAll() {
 // The one way out of a live session: stop sending, free the camera, and say why.
 function halt(message) {
   running = false;
+  $('stop').disabled = true;
   stopAll();
   startBtn.disabled = false;
   nameInput.disabled = false;
@@ -152,14 +147,13 @@ async function listCameras() {
 }
 
 async function register() {
-  // Send the stored token and the typed PIN together: if the token has gone stale, the PIN
-  // still gets us in. An empty PIN is left out, so it is not counted as a wrong guess.
+  // A new session requires the separately entered PIN during an open pairing window.
   const res = await fetch('/api/cameras', {
     method: 'POST', headers: {'content-type': 'application/json', ...authHeaders()},
     body: JSON.stringify({name, pin: pinInput.value.trim() || undefined})});
   const body = await res.json().catch(() => ({}));
   if (res.ok) {
-    if (body.token) store('token:' + name, body.token);
+    if (body.token) cameraToken = body.token;
     return null;
   }
   if (res.status === 401) forget('token:' + name);
@@ -172,6 +166,8 @@ function requestWakeLock() {
 
 async function start() {
   name = nameInput.value.trim();
+  cameraToken = '';
+  forget('token:' + name); // discard credentials left by older versions
   if (!NAME_RE.test(name)) { status('Name must be 1-40 letters, digits, spaces, _ or -.'); return; }
   // Single-shot: a second tap would re-assign srcObject and abort the first play().
   startBtn.disabled = true;
@@ -188,12 +184,10 @@ async function start() {
     if (error) throw new Error(error);
     store('name', name);
     requestWakeLock();
-    sent = 0;
     photos = 0;
     lastFrameTime = -1;
-    lastLoopAt = lastPreviewAt = 0;
-    frozenChecks = 0;
     running = true;
+    $('stop').disabled = false;
     loop(++session);
   } catch (e) {
     clearTimeout(hint);
@@ -208,7 +202,7 @@ function capture(longEdge, quality) {
   const width = Math.round(video.videoWidth * scale);
   const height = Math.round(video.videoHeight * scale);
   // Assigning either dimension clears the canvas and reallocates its backing store. Most
-  // captures have the same preview size, so only resize when the dimensions really change.
+  // captures have the same dimensions, so only resize when the dimensions really change.
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
@@ -228,101 +222,70 @@ async function capturePhoto() {
   return capture(0, PHOTO_QUALITY);
 }
 
-const ms = value => Math.round(value) + 'ms';
-function showDiagnostics(loopGap, sendGap, captureMs, uploadMs, videoDelta) {
-  const heap = performance.memory ? ' · heap ' + Math.round(performance.memory.usedJSHeapSize / 1048576) + 'MB' : '';
-  $('diagnostics').textContent =
-    'Timing: send ' + (sendGap ? (sendGap / 1000).toFixed(1) + 's' : 'first') +
-    ' · loop ' + (loopGap ? ms(loopGap) : 'first') +
-    ' · encode ' + ms(captureMs) + ' · upload ' + ms(uploadMs) +
-    ' · video +' + videoDelta.toFixed(2) + 's · skipped ' + frozenChecks +
-    ' · ' + document.visibilityState + heap;
+// Poll only for small request metadata. No background images are encoded or uploaded.
+async function responseError(res) {
+  if (res.ok) return false;
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 401) { forget('token:' + name); cameraToken = ''; }
+  if ([401, 403, 404, 410].includes(res.status)) {
+    halt(body.error || 'Ask Codex to open joining again, then tap Start.');
+  } else {
+    status(body.error || 'Request failed (' + res.status + ').');
+  }
+  return true;
 }
 
-// Upload one image. Returns the server's JSON on success, {} when there is nothing to act
-// on (the server restarted and we rejoined), or null after the session was halted.
-async function send(blob, kind) {
-  const url = '/api/cameras/' + encodeURIComponent(name) + '/frame' + (kind === 'photo' ? '?kind=photo' : '');
-  const res = await fetch(url, {method: 'POST', headers: authHeaders(), body: blob});
-  if (res.status === 401) {
-    forget('token:' + name);
-    halt('Not authorised. Enter the PIN shown on the computer and tap Start.');
-    return null;
-  }
-  if (res.status === 404) {
-    // The server restarted and forgot us: rejoin silently. If it refuses (the name was
-    // taken meanwhile, too many cameras), stop rather than claim to be live.
-    const error = await register();
-    if (error) { halt(error); return null; }
-    return {};
-  }
-  if (res.status === 410) {
-    halt('Released by the agent. Tap Start to rejoin.');
-    return null;
-  }
-  if (!res.ok) {
-    status('Server rejected the ' + kind + ' (' + res.status + ').');
-    return {};
-  }
-  return res.json().catch(() => ({}));
-}
-
-// Self-scheduling rather than setInterval, so slow Wi-Fi cannot pile up requests.
 async function loop(mySession) {
   if (!running || mySession !== session) return;
-  const loopStarted = performance.now();
-  const loopGap = lastLoopAt ? loopStarted - lastLoopAt : 0;
-  lastLoopAt = loopStarted;
   try {
-    // When another app takes the camera the track still says "live" and unmuted, and the
-    // <video> keeps showing its last frame. currentTime standing still is the only sign,
-    // and we must not upload that frozen frame as if it were new.
-    if (video.videoWidth && video.currentTime === lastFrameTime) {
-      frozenChecks++;
-      $('diagnostics').textContent =
-        'Timing: loop ' + (loopGap ? ms(loopGap) : 'first') + ' · no new video frame' +
-        ' · skipped ' + frozenChecks + ' · ' + document.visibilityState;
-      status(document.visibilityState === 'hidden'
-        ? 'Paused while this page is in the background.'
-        : 'No new picture from the camera. Is another app using it?');
-    } else if (video.videoWidth) {  // 0 while switching cameras; toBlob would yield null
-      const previousFrameTime = lastFrameTime;
-      lastFrameTime = video.currentTime;
-      const captureStarted = performance.now();
-      const preview = await capture(PREVIEW_LONG_EDGE, PREVIEW_QUALITY);
-      const capturedAt = performance.now();
-      lastPreviewBytes = preview.size;
-      const uploadStarted = performance.now();
-      const reply = await send(preview, 'preview');
-      const uploadedAt = performance.now();
-      if (!reply) return;  // halted: do not reschedule
-      const sendGap = lastPreviewAt ? uploadedAt - lastPreviewAt : 0;
-      lastPreviewAt = uploadedAt;
-      showDiagnostics(
-        loopGap,
-        sendGap,
-        capturedAt - captureStarted,
-        uploadedAt - uploadStarted,
-        previousFrameTime < 0 ? 0 : lastFrameTime - previousFrameTime,
-      );
-      frozenChecks = 0;
-      if ('hires_requested' in reply) {
-        status('Live as "' + name + '" · ' + (++sent) + ' frames sent' + (photos ? ' · ' + photos + ' photos' : ''));
-      }
-      if (reply.hires_requested && video.videoWidth) {  // 0 if a camera switch just began
-        // The agent is waiting on grab_frame: answer with a full-resolution photo now.
-        const photo = await send(await capturePhoto(), 'photo');
-        if (!photo) return;
-        if ('hires_requested' in photo) photos++;
+    const base = '/api/cameras/' + encodeURIComponent(name);
+    const res = await fetch(base + '/request', {headers: authHeaders(), cache: 'no-store'});
+    if (!await responseError(res)) {
+      const request = await res.json();
+      if (request.request_id && video.videoWidth && document.visibilityState === 'visible') {
+        // A frozen local preview must never be presented as a fresh camera capture.
+        if (video.currentTime === lastFrameTime) {
+          status('No fresh camera frame. Keep this page visible and check the camera.');
+        } else {
+          lastFrameTime = video.currentTime;
+          const started = performance.now();
+          const photo = await capturePhoto();
+          if (!running || mySession !== session) return;
+          const captured = performance.now();
+          if (photo) {
+            const reply = await fetch(base + '/frame', {
+              method: 'POST',
+              headers: {...authHeaders(), 'x-capture-request': request.request_id},
+              body: photo,
+            });
+            if (!await responseError(reply)) {
+              photos++;
+              status('Connected as "' + name + '" · ' + photos + ' requested photos sent.');
+              $('diagnostics').textContent = 'Capture ' + Math.round(captured - started) +
+                'ms · upload ' + Math.round(performance.now() - captured) + 'ms';
+            }
+          }
+        }
+      } else if (!request.request_id) {
+        status('Connected as "' + name + '" · waiting for Codex. Preview stays on this phone.');
       }
     }
   } catch (e) {
-    status('Reconnecting… (' + e.message + ')');
+    status('Connection interrupted. No photos are being sent. (' + e.message + ')');
   }
-  setTimeout(() => loop(mySession), SEND_EVERY_MS);
+  if (running && mySession === session) setTimeout(() => loop(mySession), POLL_EVERY_MS);
 }
 
 startBtn.addEventListener('click', start);
+$('stop').addEventListener('click', async () => {
+  const headers = authHeaders();
+  const cameraName = name;
+  session++;
+  halt('Camera stopped. Ask Codex to open joining before connecting again.');
+  cameraToken = '';
+  try { await fetch('/api/cameras/' + encodeURIComponent(cameraName), {method: 'DELETE', headers}); }
+  catch (e) { /* The local camera is stopped even if the network is unavailable. */ }
+});
 
 deviceSelect.addEventListener('change', async () => {
   store('deviceId', deviceSelect.value);

@@ -9,9 +9,11 @@ Phone cameras join from a browser—there is no phone app to install. The server
   <img src="assets/phone-camera-overhand-still-2026-09.jpg" width="300" alt="A full-resolution still captured on demand from the same phone camera">
 </p>
 
-*Left: the current Android phone page and its full-view preview. Right: an on-demand native still from the same scene. This test phone advertised 3064×4080; dimensions vary by device and camera.*
+*Left: an earlier Android phone page and its full-view preview. Right: an on-demand native still from the same scene. This test phone advertised 3064×4080; dimensions vary by device and camera.*
 
 ## What you can do
+
+Demonstrated workflows include two-camera capture, label reading, finger counting, and an item journal with saved photos. The main uses are journaling and inventory, reading labels, step-by-step documentation, and repairs combining a wide view with a close-up. Requested snapshots have been demonstrated; continuous monitoring and precise measurement have not been validated.
 
 Use two or three stable camera names to make hands-on work easier:
 
@@ -29,6 +31,15 @@ For a user-directed work journal, tell Codex where to save it, then say “recor
 > This server supplies named camera access and on-demand snapshots. You must explicitly ask or configure Codex to handle conversation, journaling, memory, file storage, or final documents. The server does not continuously record video, watch autonomously, decide when to capture, maintain or synchronize a project log, or create documentation by itself.
 
 This project is in early development. Tools and behavior may change.
+
+## ChatGPT Desktop plugin
+
+The [Multicam plugin](plugins/multicam/README.md) bundles the camera runtime, a
+voice workflow skill, QR setup, and spoken PIN retrieval. Native builds start a
+shared local service automatically, without Python, a terminal, or a companion
+app. See [packaging and current availability](docs/desktop-plugin.md): the Linux
+runtime is tested, while Windows/macOS builds and public distribution still need
+validation. The manual server setup below remains available for developers.
 
 ## Quick start: one shared server
 
@@ -62,7 +73,7 @@ Clients that cannot connect to Streamable HTTP can still launch the server over 
 With `ENABLE_FRAMEGRAB_PHONE_CAMERAS=true`, the server provides a small phone page over HTTPS.
 
 1. Ask the agent to add a phone camera. It calls `add_phone_camera`, opens a local page with a QR code and PIN, and returns the same joining information. If the page does not open, the agent can give you the link and PIN.
-2. Put the phone on the same Wi-Fi as the computer and scan the QR code. Without a scanner, open `https://<computer-ip>:8443/` on the phone and enter the PIN.
+2. Put the phone on the same Wi-Fi as the computer and scan the QR code. Without a scanner, open `https://<computer-ip>:8443/` on the phone. Enter the PIN shown separately on the desktop: the QR code and link contain only the address.
 3. Accept the browser's certificate warning. The server creates a self-signed certificate because browsers require HTTPS for camera access.
 
    <img src="assets/cert-warning.png" width="240" alt="Chrome's 'Your connection is not private' warning. Tap Advanced, then Proceed.">
@@ -73,34 +84,31 @@ Names work like any other framegrabber. Ask the client to list cameras, grab one
 
 ### What happens on the phone
 
-- The page requires `resizeMode: none`, preferring a 4080×3064 landscape mode. A portrait device can expose the corresponding 3064×4080 track. If the browser cannot provide an uncropped track, setup fails clearly instead of silently accepting crop-and-scale behavior.
-- While idle, the phone targets one preview after each one-second loop. Previews keep their aspect ratio, use at most 1280 pixels on the long edge, and use JPEG quality `0.7`. Their exact size and timing are device-dependent; the example phone produced 961×1280 previews.
-- `grab_frame` asks the page for a native `ImageCapture.takePhoto()` at the maximum still dimensions advertised by the browser. The page does not crop, stretch, or resize that result. If Image Capture is unavailable, it falls back to the complete uncropped video frame.
-- The server waits up to four seconds for the requested photo, then falls back to the latest fresh preview. It re-encodes the returned image as the requested `png`, `jpg`, or `webp` format.
-- The status line shows the send interval, loop, encoding and upload times, video-frame delta, skipped loops, page visibility, and JavaScript heap usage where the browser exposes it.
-- The camera selector switches between front and back cameras. Torch control appears where supported. The page requests a wake lock while live and reconnects automatically after a server restart or short network interruption.
-
-“Native” here means the largest still output the browser reports. The browser, camera HAL, or OEM image pipeline can still apply sensor cropping or other processing, so the server cannot prove that a photo contains every raw physical sensor pixel.
+- The preview stays on the phone. While connected, the page checks for capture-request metadata every half-second; it does not encode or upload background preview images.
+- `grab_frame` creates a random, single-use request ID, valid for eight seconds. The authenticated phone sees it and sends one photo. The server rejects unsolicited, expired, replayed, or wrong-camera responses before accepting an image body.
+- Native `ImageCapture.takePhoto()` uses the maximum still dimensions advertised by the browser. Without it, the page captures the full uncropped video frame on request. The page prefers an uncropped 4080×3064 track; actual dimensions depend on the device.
+- If the phone does not answer in time, the tool reports an error. There is no cached-preview fallback.
+- Keep the page visible and the phone awake. Camera switching, torch, and wake lock are supported where the browser exposes them.
 
 ### Connection behavior
 
-| Situation | What happens |
-|---|---|
-| Agent calls `grab_frame` | The server requests a full-resolution photo and waits up to four seconds; otherwise it uses the latest fresh preview. |
-| Agent calls `release_grabber` | The page stops sending and says so. Tap **Start** to rejoin. |
-| The shared server restarts | The page reconnects under the same name using its saved token. |
-| The page is hidden, the phone sleeps, or another app takes the camera | Uploads stop, and `grab_frame` reports how old the last frame is instead of returning a stale image. Sending resumes when the page is active again. |
-| The page is open in two tabs | Only one tab can use the camera; the other reports the conflict. |
-| A name belongs to a USB, RTSP, or other camera | The page reports the conflict. Choose another name. |
-| The phone asks for the PIN again | Its token is no longer valid, such as after the server data directory was deleted. Request the current PIN. |
+Joining is closed by default. Ask Codex to connect a phone to open a 60-second window, then enter the separately displayed PIN. If time runs out, ask Codex to open joining again; it creates a fresh PIN. Checking the PIN alone does not extend the window.
+
+Already connected cameras continue to answer requested snapshots after joining closes. A reload or server restart that requires registration needs another open joining window. Reloading the phone page or restarting the server requires entering the current PIN again; credentials are kept only in memory. Releasing a camera stops its requests and cancels a pending capture.
+
+If IP detection fails, Codex asks for the computer's Wi-Fi IPv4 address from Network Settings and passes it through `add_phone_camera(computer_ip=...)`. It must never guess an address or offer localhost as a phone URL.
 
 ### Security
 
-Joining requires the current PIN. It changes whenever the server starts. After joining, the phone stores a name-specific token, so ordinary reloads and server restarts do not require the PIN again. Five wrong PINs from one address pause that address for one minute.
+Opening the phone page or scanning its QR code does not authorize a new phone. Joining requires the current PIN for new phones and an open 60-second window for every registration. The PIN changes whenever joining is reopened. A paired phone holds a random session token only in memory. Disconnecting the camera or restarting the server revokes it. Five wrong PINs from one address pause that address for one minute; ten wrong PINs across all addresses close the pairing window.
 
-The token key and self-signed certificate are kept in the data directory described under [Configuration](#configuration). Deleting that directory signs every phone out and creates a new certificate on the next start.
+The HTTPS phone page is reachable by other devices on the local network. Viewing it grants no camera access. Requests and image uploads require a camera token; uploads additionally require the single-use capture request ID. There is no unauthenticated camera-image download endpoint. This controls accepted requests, not the ability of another network device to attempt connections.
+
+The self-signed certificate is kept in the data directory described under [Configuration](#configuration). Pairing tokens are not persisted. The phone opens no listening port; it initiates HTTPS requests to the selected LAN address of the computer. The phone page blocks cross-origin browser requests and framing, restricts scripts with a content security policy, and disables caching of credentials and responses.
 
 Frames travel from the phone to this server over HTTPS. The server does not upload them elsewhere, but the connected MCP client determines how returned snapshots are processed or stored. The phone shows a certificate warning the first time because the certificate is self-signed.
+
+The self-signed certificate exception is a remaining trust-bootstrap limitation; this package is not independently audited or certified for high-security office deployments.
 
 Phone cameras are tested with Chrome on Android. Safari on iOS has not been tested yet.
 
@@ -130,7 +138,8 @@ With autodiscovery enabled, `FRAMEGRAB_RTSP_AUTO_DISCOVERY_MODE` controls the RT
 | `get_framegrabber_config` | Return a framegrabber's configuration. |
 | `set_config` | Update a framegrabber's configuration options. Phone cameras have no configurable options. |
 | `release_grabber` | Release and remove a framegrabber. |
-| `add_phone_camera` | Return the join link, PIN, and QR code, and normally open a local joining page. Pass `open_browser=false` to skip opening it. |
+| `add_phone_camera` | Return the link, separate PIN, and URL-only QR code; open the local setup page. Use `open_browser=false` to skip opening it, or `computer_ip` with the user-provided Wi-Fi IPv4 address if detection fails. |
+| `get_phone_connection_info` | Retrieve the current URL, joining link, PIN, and digit-by-digit PIN text without opening a browser. |
 
 ### Resources
 
@@ -150,7 +159,7 @@ All settings are environment variables.
 | `MULTICAM_MCP_HOST` | `127.0.0.1` | MCP listen address in Streamable HTTP mode. |
 | `MULTICAM_MCP_PORT` | `8000` | MCP listen port in Streamable HTTP mode. |
 
-The certificate, token key, and joining page are stored in the user data directory—on Linux, `~/.local/share/multicam-mcp-server/`.
+The certificate and private joining page are stored in the user data directory—on Linux, `~/.local/share/multicam-mcp-server/`.
 
 ## Development
 

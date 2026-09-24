@@ -38,6 +38,7 @@ _grabber_cache = {}
 
 # The phone camera server while it is listening, else None. Set by app_lifespan.
 _phone_server: PhoneCameraServer | None = None
+_phone_start_error: str | None = None
 
 
 @asynccontextmanager
@@ -53,13 +54,15 @@ async def app_lifespan(server: MCPServer) -> AsyncIterator[Any]:
         except Exception:
             logger.error("Error autodiscovering framegrabbers.", exc_info=True)
 
-    global _phone_server
+    global _phone_server, _phone_start_error
+    _phone_start_error = None
     if ENABLE_FRAMEGRAB_PHONE_CAMERAS:
         try:
             phone_server = PhoneCameraServer(_grabber_cache)
             if phone_server.start(port=int(FRAMEGRAB_PHONE_CAMERAS_PORT)):
                 _phone_server = phone_server
-        except Exception:
+        except Exception as exc:
+            _phone_start_error = str(exc)
             logger.error("Error starting phone camera server.", exc_info=True)
 
     logger.info("Multicam MCP server has started, listening for requests...")
@@ -80,6 +83,15 @@ async def app_lifespan(server: MCPServer) -> AsyncIterator[Any]:
 
 mcp = MCPServer(
     "multicam",
+    instructions=(
+        "Multicam supplies on-demand camera snapshots, not continuous vision. "
+        "add_phone_camera opens a 60-second pairing window; QR contains only the URL, PIN is separate. "
+        "Explain local-network exposure and PIN/token protection. Expired joining needs a user-requested reopen. "
+        "For PIN/status use get_phone_connection_info; it does not reopen joining. "
+        "List cameras and capture a fresh frame before describing the current scene. "
+        "Keep voice replies short. Never guess unreadable details or claim a journal was saved "
+        "without using a separate storage tool."
+    ),
     dependencies=[
         "framegrab>=0.11.0",
         "opencv-python",
@@ -224,23 +236,82 @@ def release_framegrabber(framegrabber_name: str) -> bool:
 
 
 @mcp.tool(
-    name="add_phone_camera",
-    description="""Get what a person needs to connect a phone as a camera: a link, a PIN, and a QR code that carries both.
-By default it also opens a page with the QR code in this computer's browser. Tell the user the link and the PIN.
-Once the phone has joined, its name appears in list_framegrabbers and works with grab_frame.""",
+    name="get_phone_connection_info",
+    description="Get the phone URL, pairing-window status, and current PIN while joining is open. Does not reopen joining. If closed, ask the user to request a new 60-second window via add_phone_camera. Keep the PIN private.",
 )
-def add_phone_camera(open_browser: bool = True) -> list:
+def get_phone_connection_info() -> dict:
     if _phone_server is None:
         raise ValueError(
-            "Phone cameras are not running. Set ENABLE_FRAMEGRAB_PHONE_CAMERAS=true in this MCP server's "
+            (_phone_start_error + " " if _phone_start_error else "")
+            + "Phone cameras are not running. If address detection failed, ask the user for this computer's "
+            "Wi-Fi IPv4 address from Network Settings, then call add_phone_camera with computer_ip."
+        )
+    return {
+        "url": _phone_server.url,
+        "join_url": _phone_server.join_url,
+        **_phone_server.pairing_info(),
+    }
+
+
+@mcp.tool(
+    name="add_phone_camera",
+    description="""Get what a person needs to connect a phone as a camera: a link, a separate PIN, and a QR code containing only the link.
+Opens or reopens joining for 60 seconds and rotates the PIN. Use when the user requests connecting a phone or reopening joining, not merely to check the PIN. Explain that the phone page is reachable on the local network but joining requires the PIN and a live pairing window; uploads require an authorized camera token.
+By default it also opens a page with the QR code in this computer's browser. Tell the user the link and the PIN.
+If address detection fails, ask for the computer's Wi-Fi IPv4 address from Network Settings and pass it as computer_ip. Never guess or use localhost. Changing computer_ip briefly restarts the phone listener.
+Once the phone has joined, its name appears in list_framegrabbers and works with grab_frame.""",
+)
+def add_phone_camera(open_browser: bool = True, computer_ip: str | None = None) -> list:
+    """computer_ip is the computer's user-provided LAN IPv4 address when detection fails."""
+    global _phone_server, _phone_start_error
+    if computer_ip is not None and ENABLE_FRAMEGRAB_PHONE_CAMERAS:
+        from multicam_mcp_phone import _phone_host_ip
+
+        ip = _phone_host_ip(computer_ip)
+        if _phone_server is not None:
+            # Rebuild the HTTPS certificate and QR when the user corrects an address.
+            # Keep the existing registry, PIN, and phone token key.
+            _phone_server.stop()
+            phone_server = _phone_server
+            _phone_server = None
+        else:
+            phone_server = PhoneCameraServer(_grabber_cache)
+        try:
+            if phone_server.start(
+                port=int(FRAMEGRAB_PHONE_CAMERAS_PORT), computer_ip=ip
+            ):
+                _phone_server = phone_server
+                _phone_start_error = None
+        except Exception as exc:
+            _phone_start_error = str(exc)
+            raise
+    if _phone_server is None:
+        raise ValueError(
+            (
+                _phone_start_error
+                + " Ask the user for the computer's Wi-Fi IPv4 address from Network Settings, "
+                "then retry add_phone_camera with computer_ip. Never substitute 127.0.0.1. "
+                if _phone_start_error
+                else ""
+            )
+            + "Phone cameras are not running. Set ENABLE_FRAMEGRAB_PHONE_CAMERAS=true in this MCP server's "
             f"environment and restart it. If it is already set, port {FRAMEGRAB_PHONE_CAMERAS_PORT} may be "
             "in use by another copy of this server; set FRAMEGRAB_PHONE_CAMERAS_PORT to a free port."
         )
+    _phone_server.open_join_window()
+    browser_status = ""
     if open_browser:
-        _phone_server.open_join_page()
+        if _phone_server.open_join_page():
+            browser_status = " The joining page was sent to the desktop browser."
+        else:
+            browser_status = " The desktop browser could not be opened; show the returned QR code instead."
     return [
         f"On the phone, open {_phone_server.url} (same network as this computer) or scan the QR code. "
-        f"PIN: {_phone_server.pin}. The phone will show a certificate warning the first time; that is expected.",
+        f"PIN: {_phone_server.pin}. The phone will show a certificate warning the first time; that is expected."
+        " Joining is open for 60 seconds. After it closes, ask Codex to open joining again for a new PIN."
+        " This page is reachable on the local network, but viewing it does not grant access:"
+        " new phones need the PIN while joining is open; frame uploads require an authorized camera token."
+        + browser_status,
         Image(data=_phone_server.qr_png(), format="png"),
     ]
 
